@@ -1,0 +1,27 @@
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Don't ship user's captured data
+captures/
+screenshots/
+*.png
+*.jpg
+
+# Don't ship user's vault content
+.obsidian/
+
+# Don't ship private retro logs
+_research_method_v*.md
+_progress.log
+_mobile_run.log
+_retro.md
+BLOCKER.md
+STUCK.md
+UI_DRIFT.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
