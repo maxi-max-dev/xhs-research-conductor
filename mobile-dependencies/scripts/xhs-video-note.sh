@@ -108,9 +108,14 @@ else
   fi
 
   # 6. 转录 (Groq Whisper zh; transcribe-file.sh 缺席则降级留元数据)
+  # 默认后端 (本机 transcribe-file.sh) 自带"转录完成→推送用户"回执, 必须静音 —
+  # 交付责任在调用方 (聊天回复/调研报告), 否则每转一条用户就收一条莫名推送 (2026-07-10 真踩, 一天七条).
+  # 用户自设 XHS_TRANSCRIBE_CMD 时不加料, 按原样调用.
+  NOTIFY_FLAG=""
+  [ -z "${XHS_TRANSCRIBE_CMD:-}" ] && NOTIFY_FLAG="--no-notify"
   if [ "$DO_TRANSCRIBE" -eq 1 ]; then
     if [ -x "$TRANSCRIBE_CMD" ]; then
-      if "$TRANSCRIBE_CMD" -l zh -f txt -o "$OUT_DIR" "$OUT_DIR/audio.mp3" >/dev/null 2>&1 \
+      if "$TRANSCRIBE_CMD" $NOTIFY_FLAG -l zh -f txt -o "$OUT_DIR" "$OUT_DIR/audio.mp3" >/dev/null 2>&1 \
          && [ -s "$OUT_DIR/audio.txt" ]; then
         TRANSCRIPT_STATE="ok"
         TRANSCRIPT_CHARS=$(LC_ALL=en_US.UTF-8 wc -m < "$OUT_DIR/audio.txt" | tr -d ' ')
