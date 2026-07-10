@@ -1,21 +1,21 @@
 ---
 name: xhs-research-conductor
-description: XHS (小红书) 专用主题调研技能。给一个主题(如"某公司笔试"/"GLM 模型好用吗"/"应届生迷茫"), 自动扩词 → mobile 在 XHS app 内搜+采集 → 综合报告落 vault. **只做 XHS 这一个源** (其他源知乎/牛客/公众号由上游 agent 自己用 WebFetch 处理). 上游 agent 可并行调多 skill 合并结果. **默认 fast mode** (3 kw × 1 bundle × 4 页 ≈ 5-10 min); 用户说"深度/正经调研/精读"才走 `--deep` (5 kw × ≥4 bundle × 20 页 + 抓评论 ≈ 15-30 min).
+description: XHS (小红书) 专用主题调研技能。给一个主题(如"某公司笔试"/"GLM 模型好用吗"/"应届生迷茫"), 自动扩词 → mobile 在 XHS app 内搜+采集 → 综合报告落 vault. **只做 XHS 这一个源** (其他源知乎/牛客/公众号由上游 agent 自己用 WebFetch 处理). 上游 agent 可并行调多 skill 合并结果. **默认 fast mode** (3 kw × 1 bundle × 4 页 ≈ 5-10 min); 用户说"深度/正经调研/精读"才走 `--deep` (5 kw × ≥4 bundle × 20 页 + 抓评论 ≈ 15-30 min). **v0.17 起带视频道**: 图文流之后自动收每 kw 的头部视频 (fast 1 条/kw, deep 2 条/kw), yt-dlp 抽音轨 + Whisper 转文字进报告.
 trigger: 调研|研究|搜小红书|看看小红书|XHS 上|帮我搜|查一下|了解一下
-version: 0.16.3
+version: 0.17
 ---
 
 # XHS Research Conductor
 
 ## 🎯 是 / 不是
 
-**是**: 总指挥. 串联 `xhs-research-lite` (思考框架) + mobile agent (采集) + OCR pipeline + vault 输出. **专做图文调研** (Note type filter mandatory).
+**是**: 总指挥. 串联 `xhs-research-lite` (思考框架) + mobile agent (采集) + OCR pipeline + vault 输出. 图文走截图+OCR (Note type filter mandatory); **视频走 v0.17 视频道** (mobile 图文流之后, dispatch 确定性收割 URL → yt-dlp 音轨 → Whisper 文字稿, 零截图零 LLM).
 
 **不是**:
 - ❌ 重新发明 XHS 采集 (走 `xhs-capture-*` scripts)
 - ❌ 重新发明思考框架 (走 `xhs-research-lite`)
 - ❌ 通用 web 研究 (只 XHS)
-- ❌ **视频笔记调研** (用户直接发视频链接走 `xhs-open-link` skill 单独处理, 不要在调研流程里 capture 视频)
+- ❌ **在 mobile 采集流里 capture 视频** — DetailFeedActivity 播放中 uiautomator 永不 idle, dump 必挂 (Test 11 死循环的底层死因, 2026-07-10 实锤). 视频只在视频道处理; 用户单发视频链接走 `xhs-open-link`/`xhs-video-note.sh`
 
 **早死**: 主题在 XHS 几乎没人讨论 → 立刻告诉用户换源, 不要硬跑.
 
@@ -37,12 +37,14 @@ version: 0.16.3
 | 目标 bundle | **≥ 3** | ≥ 4 |
 | carousel 每 bundle | **4 页 cap** | 20 页 |
 | 评论抓取 | **skip** (靠 OCR 第一屏判断) | 跑 `xhs-capture-comments.sh` (v0.16: 确定性滚到评论区+多屏抓取+去重, 别手敲 swipe) |
-| 总耗时 | **≈ 5-10 min** | ≈ 15-30 min |
+| 🎬 视频/kw (v0.17) | **1 条** | 2 条 |
+| 总耗时 | **≈ 5-10 min** (+视频道 ~1 min/条) | ≈ 15-30 min |
 | 适用 | 快查/投简历前扫一眼/AirPods 值不值 | 公司面经/产品深度评测/雇主全景 |
 
 **判别**: 用户没特别说 → fast. 出现"深度/正经/精读/完整/详细"或主题明显需要多维度 (例: "某公司作为雇主全面评估") → deep, 先跟用户确认 "走 deep 模式 ~20 min 可以吗" 再派.
 
-**派发**: `xhs-research-dispatch.sh [--mode fast|deep] <test_id> <slug> <prefix> "<topic>" "<kw1>" ...`
+**派发**: `xhs-research-dispatch.sh [--mode fast|deep] [--videos N] <test_id> <slug> <prefix> "<topic>" "<kw1>" ...`
+(`--videos 0` 关视频道; 不传按 mode 默认 fast=1/deep=2, env `XHS_VIDEOS` 可覆盖)
 
 **⭐ 多 kw + 弱模型的稳妥路径 = `xhs-research-serial.sh`** (一 kw 一 agent run 串行 loop):
 LLM 单请求 ~10 min 墙是硬约束 — 多 kw 单 run 必在最后一个 kw 中途被杀 (v0.16.1 有 resume 接力
@@ -124,9 +126,11 @@ $SCRIPTS_DIR/xhs-vault-history-check.sh "<topic_cn>" [topic_slug]
 5. 现在 list 纯图文 — 走 L1 prefilter (放宽) + enter + capture 流程
 ```
 
-**为什么 mandatory**: 不带 filter 的话 vlog 类笔记会跳 DetailFeedActivity (XHS immersive video feed), mobile 当前架构不支持 capture 视频, 严守铁律 8 skip 会陷入死循环 (Test 11 真踩). 加 filter 后纯图文, 0 视频干扰.
+**为什么 mandatory**: 不带 filter 的话 vlog 类笔记会跳 DetailFeedActivity (XHS immersive video feed), mobile 截图+OCR 架构吃不了视频 (播放中 uiautomator 永不 idle, dump 必挂), 严守铁律 8 skip 会陷入死循环 (Test 11 真踩). 加 filter 后纯图文, 0 视频干扰.
 
-**用户的视频内容**: 走单独 `xhs-open-link` skill (用户直发视频链接), 跟调研流程**不冲突**.
+**视频怎么进报告 (v0.17 视频道)**: mobile 图文流跑完后, dispatch 主流程自己 (不经 LLM) 按 kw 重发搜索深链 → `xhs-set-note-filter.sh --type video` → `xhs-harvest-video-urls.sh` 在沉浸流里收 N 条分享链接 (分享面板开着时视频暂停, dump 才可用; Copy link 常要左滑一次) → `xhs-video-note.sh` 逐条 yt-dlp 抽音轨 (实测无需 cookies) + Whisper 转文字 → `bundles/<prefix>-vidK-N/` (manifest `type:video`, 无 PNG, 不进图文 bundle 计数). 跨 kw 撞车按 note_id 去重. 纯 BGM/字幕视频文字稿会标 ⚠️ low voice.
+
+**用户单发视频链接**: 走 `xhs-open-link` skill 或直接 `xhs-video-note.sh '<url或分享文本>'`, 跟调研流程**不冲突**.
 
 ### 派发时**同步** spawn watchdog (v0.6 mandatory)
 ```bash
@@ -186,7 +190,7 @@ xhs-research-dispatch.sh --mode deep 22 acme-employer ace "某公司 雇主" \
 ## Phase C — 综合 (本 skill 做)
 
 ### 输入
-所有 bundle 的 `ocr.md` + `manifest.json` + `_progress.log` + 主题原文. **deep mode 还有** `comments.json` (fast mode 没抓评论, 别去找).
+所有 bundle 的 `ocr.md` + `manifest.json` + `_progress.log` + 主题原文. **deep mode 还有** `comments.json` (fast mode 没抓评论, 别去找). **v0.17 还有** 视频 bundle 的 `transcript.md` (笔记文案 + 口播文字稿) — conductor 做 Phase C 时把它当正文级材料一起分析; `voice_info: low` 的只当线索别当证据.
 
 ### 处理
 1. **去重** (Test 2 学到): 按 manifest title + ocr 第 1 段, 重复者移 `_duplicates/`
@@ -271,12 +275,21 @@ export XHS_RESEARCH_LOG="$HOME/.openclaw/_research_method_log"
 # thinking 档位是 model-specific 的 (MiniMax-M3 只认 off/adaptive), 别硬编码.
 export XHS_MODEL=""        # 例: "anthropic/claude-sonnet-5" — XHS 调研单独指强模型
 export XHS_THINKING=""     # 例: "adaptive"
+# v0.17 视频道
+export XHS_VIDEOS=""           # 每 kw 收几条视频 (覆盖 mode 默认 fast=1/deep=2; 0=关)
+export XHS_VIDEO_MAX_SEC=""    # 单条视频时长上限秒 (默认 900, 超限只留元数据)
+export XHS_TRANSCRIBE_CMD=""   # 转录命令 (默认 ~/.openclaw/workspace/scripts/transcribe-file.sh;
+                               # 缺席时视频 bundle 降级为 音轨+元数据)
 ```
 
 跨机器移植时改 env vars 即可.
 
 ---
 
+*v0.17 (2026-07-10, 视频道). 改进:*
+*- 视频不再是盲区: dispatch 图文流之后跑视频道 (每 kw 收 fast=1/deep=2 条头部视频), 确定性 adb 收割分享链接 → yt-dlp 抽音轨 (实测无需 cookies) → Groq Whisper 转文字 → bundles/<prefix>-vidK-N/ (manifest type:video). 报告新增 "🎬 视频笔记" 节 (标题+链接+口播摘录+完整稿指路), frontmatter 加 videos: N. 纯 BGM/字幕视频按 transcript 字数标 ⚠️ low voice (e2e 实测逮到过纯 BGM 教程视频). 图文 0 但视频 ≥1 也出报告.*
+*- 新脚本: xhs-video-note.sh (URL→文字稿 bundle, 单条视频链接也用它) + xhs-harvest-video-urls.sh (沉浸流收割: 分享面板开着时视频暂停 uiautomator 才能 dump — 这也是当年视频死循环的底层死因; Copy link 在面板第二行常要左滑). xhs-set-note-filter.sh 加 --type note|video (默认 note 字节级兼容).*
+*- 视频道在 dispatch 主流程不在 cleanup trap: Ctrl-C 不会再拖几分钟收视频. 跨 kw 同视频按 note_id 去重. --videos N / XHS_VIDEOS 可调可关.*
 *v0.16.3 (2026-07-06). 改进:*
 *- 全面可移植: 所有路径改为相对脚本自身解析 (clone 到哪都能跑), XHS_SCRIPTS_DIR/XHS_CAPTURE_ROOT 可覆盖; OpenClaw 老安装位置解析结果不变.*
 *- 任意分辨率/模拟器: 新增 xhs-geom.sh, 全部 tap/swipe 坐标按实际 wm size 等比换算 (基准 1440x2560, 该分辨率下恒等); 设备选择走 ANDROID_SERIAL/XHS_EMULATOR/自动探测.*

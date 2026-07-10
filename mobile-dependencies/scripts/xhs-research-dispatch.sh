@@ -34,10 +34,12 @@ set -uo pipefail   # NOTE: no -e, 推送失败不能终止 dispatch
 # ========== Args ==========
 MODE="fast"
 FORCE=0
+VIDEOS_ARG=""
 while true; do
   case "${1:-}" in
     --mode) MODE="${2:-}"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --videos) VIDEOS_ARG="${2:-}"; shift 2 ;;
     *) break ;;
   esac
 done
@@ -47,7 +49,7 @@ if [ "$MODE" != "fast" ] && [ "$MODE" != "deep" ]; then
 fi
 
 if [ $# -lt 5 ]; then
-  echo "Usage: $0 [--mode fast|deep] [--force] <test_id> <topic_slug> <bundle_prefix> <topic_chinese> <kw1>...[kwN]" >&2
+  echo "Usage: $0 [--mode fast|deep] [--force] [--videos N] <test_id> <topic_slug> <bundle_prefix> <topic_chinese> <kw1>...[kwN]" >&2
   exit 1
 fi
 
@@ -64,13 +66,38 @@ if [ "$MODE" = "fast" ]; then
   CAROUSEL_PAGES=4
   BUNDLE_TARGET=3
   KW_MAX=3
+  VIDEOS_DEFAULT=1
   COMMENTS_DIRECTIVE="⛔ fast mode: **跳过评论 extraction** — 不跑 \$SCRIPTS_DIR/xhs-extract-comments.sh (用户要快, 评论靠 OCR 第一屏判断够了)"
 else
   CAROUSEL_PAGES=20
   BUNDLE_TARGET=4
   KW_MAX=5
+  VIDEOS_DEFAULT=2
   COMMENTS_DIRECTIVE="⭐ deep mode: 每个 bundle OCR 完后跑 \$SCRIPTS_DIR/xhs-extract-comments.sh \$CAP_DIR/bundles/<bundle>/comments.json 抓评论"
 fi
+
+# v0.17 视频道: 每 kw 收几条视频 (收割 URL → yt-dlp 音轨 → Whisper 转文字, 全程零截图零 LLM).
+# 优先级: --videos 参数 > XHS_VIDEOS env > mode 默认 (fast=1, deep=2). 0 = 关掉视频道.
+VIDEOS_N="${VIDEOS_ARG:-${XHS_VIDEOS:-$VIDEOS_DEFAULT}}"
+case "$VIDEOS_N" in
+  ''|*[!0-9]*) echo "❌ --videos 要非负整数, got: '$VIDEOS_N'" >&2; exit 1 ;;
+esac
+
+# Per-run overrides (2026-06-07): xhs-research-serial.sh sets these so each
+# single-keyword run stays SMALL enough to finish under the ~10min model-request
+# timeout. Root cause of the 2026-06-07 hang: deep mode packed 5 kw × 4 bundle ×
+# 20 页 + 评论 into ONE mobile agent run → 14m25s, tokens 0 (LLM single-request
+# timeout). Fix = one kw per agent run, looped serially. These let the loop dial
+# each run down (e.g. 1 kw, target 2, carousel 6, comments on).
+[ -n "${XHS_CAROUSEL_PAGES:-}" ] && CAROUSEL_PAGES="$XHS_CAROUSEL_PAGES"
+[ -n "${XHS_BUNDLE_TARGET:-}" ] && BUNDLE_TARGET="$XHS_BUNDLE_TARGET"
+COMMENTS_LABEL=$([ "$MODE" = "fast" ] && echo skip || echo on)
+case "${XHS_COMMENTS:-}" in
+  on)  COMMENTS_LABEL="on"
+       COMMENTS_DIRECTIVE="⭐ 抓评论: carousel capture 完后, **跑一条命令** \`\$SCRIPTS_DIR/xhs-capture-comments.sh \$CAP_DIR/bundles/<bundle> 6\` —— 它自动滚到评论区 + 多屏抓取 + 去重合并到 <bundle>/comments.json. **不要自己手敲 swipe+extract**(2026-06-07 真踩: agent 手抓全 count=0, 因为在 carousel/正文页没滚到评论). ⭐ 选笔记时偏向**会有评论的**(求推荐/求助/吐槽/对比/提问类), 跳过纯教程/模板/清单贴(常 0 评论). 某条真没评论(count=0)是正常的, 别卡住, 继续下一条." ;;
+  off) COMMENTS_LABEL="skip"
+       COMMENTS_DIRECTIVE="⛔ skip 评论 extraction (用户要快)" ;;
+esac
 
 if [ "$KW_COUNT" -gt "$KW_MAX" ]; then
   echo "❌ $MODE mode allows max $KW_MAX kw, got $KW_COUNT. 砍 kw 或换 --mode deep." >&2
@@ -140,7 +167,7 @@ cat > "$CAP_DIR/PLAN.md" <<EOF
 
 ${KW_COUNT} kw: ${KW_PLAN}
 bundle prefix: ${BUNDLE_PREFIX}
-mode: ${MODE} (target ${BUNDLE_TARGET} bundle, carousel ${CAROUSEL_PAGES} 页 cap, comments=$([ "$MODE" = "fast" ] && echo skip || echo on))
+mode: ${MODE} (target ${BUNDLE_TARGET} bundle, carousel ${CAROUSEL_PAGES} 页 cap, comments=${COMMENTS_LABEL})
 v0.8 filter mandatory + v0.9 TG per-bundle + singleton enforcement + v0.10 URL capture + v0.11 mode caps + v0.12 startup self-check + v0.13 captured-verify + auto vault
 EOF
 
@@ -150,6 +177,15 @@ valid_bundle_count() {
   local ct=0 d
   for d in "$CAP_DIR"/bundles/*/; do
     [ -f "${d}manifest.json" ] && ls "${d}"*.png >/dev/null 2>&1 && ct=$((ct + 1))
+  done
+  echo "$ct"
+}
+
+# v0.17: 视频 bundle = manifest type=video (无 PNG, 与图文口径天然隔离)
+video_bundle_count() {
+  local ct=0 d
+  for d in "$CAP_DIR"/bundles/*/; do
+    [ -f "${d}manifest.json" ] && [ "$(jq -r '.type // ""' "${d}manifest.json" 2>/dev/null)" = "video" ] && ct=$((ct + 1))
   done
   echo "$ct"
 }
@@ -195,18 +231,24 @@ cleanup() {
   fi
 
   # v0.13 auto-synthesize vault report (P4: ship-C 必需, 陌生人没 Claude 帮合成)
-  if [ -s "$CAP_DIR/_retro.md" ]; then
+  # v0.17: 只有视频道产出 (0 图文但 ≥1 视频) 也要出报告
+  if [ -s "$CAP_DIR/_retro.md" ] || [ "$(video_bundle_count)" -ge 1 ]; then
     "$SCRIPTS_DIR/xhs-synthesize-vault.sh" "$CAP_DIR" "$TOPIC_CN" "$TOPIC_SLUG" "$TEST_ID" 2>&1 | head -20 || true
   fi
 
-  # Last-mile TG push
+  # Last-mile TG push (v0.17: 报文带视频数)
+  VIDEO_CT=$(video_bundle_count)
+  VIDEO_NOTE=""
+  [ "$VIDEO_CT" -ge 1 ] && VIDEO_NOTE=" + ${VIDEO_CT} 视频"
   if [ -s "$CAP_DIR/_retro.md" ]; then
     BUNDLE_CT=$(valid_bundle_count)
     if grep -q "Auto-fabricated retro" "$CAP_DIR/_retro.md"; then
-      "$SCRIPTS_DIR/xhs-tg-push.sh" "♻️ T${TEST_ID} ${TOPIC_SLUG} 完成 (auto-recovered)" "$BUNDLE_CT bundle, mobile silent abort 后 conductor 兜底 fabricate retro" 2>/dev/null || true
+      "$SCRIPTS_DIR/xhs-tg-push.sh" "♻️ T${TEST_ID} ${TOPIC_SLUG} 完成 (auto-recovered)" "$BUNDLE_CT bundle${VIDEO_NOTE}, mobile silent abort 后 conductor 兜底 fabricate retro" 2>/dev/null || true
     else
-      "$SCRIPTS_DIR/xhs-tg-push.sh" "✅ T${TEST_ID} ${TOPIC_SLUG} 完成 (clean)" "$BUNDLE_CT bundle, mobile 主动写了 retro" 2>/dev/null || true
+      "$SCRIPTS_DIR/xhs-tg-push.sh" "✅ T${TEST_ID} ${TOPIC_SLUG} 完成 (clean)" "$BUNDLE_CT bundle${VIDEO_NOTE}, mobile 主动写了 retro" 2>/dev/null || true
     fi
+  elif [ "$VIDEO_CT" -ge 1 ]; then
+    "$SCRIPTS_DIR/xhs-tg-push.sh" "⚠️ T${TEST_ID} ${TOPIC_SLUG} 仅视频道产出" "图文 0 bundle 但收到 ${VIDEO_CT} 条视频文字稿, 报告已出" 2>/dev/null || true
   elif [ -s "$CAP_DIR/STUCK.md" ]; then
     "$SCRIPTS_DIR/xhs-tg-push.sh" "🚨 T${TEST_ID} ${TOPIC_SLUG} STUCK" "exit=$exit_code, 看 STUCK.md" 2>/dev/null || true
   else
@@ -401,6 +443,42 @@ echo "watchdog spawned PID=$WD_PID monitoring mobile $MOB_PID"
 wait $MOB_PID
 MOB_EXIT=$?
 echo "mobile exited with $MOB_EXIT"
+
+# ========== v0.17 视频道 (图文流之后跑, 确定性 adb 收割 + 本地转录, 零 LLM 参与) ==========
+# 故意放主流程而不是 cleanup trap: Ctrl-C 中断时不该再花几分钟收视频.
+# 每 kw: 搜索深链 → Video filter → 沉浸流收 N 条链接 → yt-dlp 音轨 → Whisper 文字稿.
+# 产出 bundles/<prefix>-vidK-N/ (manifest type=video, 无 PNG → 不进图文 bundle 计数口径).
+if [ "$VIDEOS_N" -gt 0 ]; then
+  echo "video lane: 每 kw 收 ≤$VIDEOS_N 条视频"
+  SEEN_VIDEO_IDS=""
+  KI=0
+  for kw in "${KWS[@]}"; do
+    KI=$((KI+1))
+    VTSV="$CAP_DIR/_video_urls_kw${KI}.tsv"
+    if ! "$SCRIPTS_DIR/xhs-harvest-video-urls.sh" --count "$VIDEOS_N" --out "$VTSV" "$kw" >> "$CAP_DIR/_video_lane.log" 2>&1; then
+      echo "video lane: kw${KI} \"$kw\" 收割失败 (细节 _video_lane.log), 继续下一个 kw"
+      continue
+    fi
+    VI=0
+    while IFS=$'\t' read -r vurl vtitle; do
+      [ -z "$vurl" ] && continue
+      VI=$((VI+1))
+      VB="$CAP_DIR/bundles/${BUNDLE_PREFIX}-vid${KI}-${VI}"
+      if "$SCRIPTS_DIR/xhs-video-note.sh" -o "$VB" --title "$vtitle" "$vurl" >> "$CAP_DIR/_video_lane.log" 2>&1; then
+        NID=$(jq -r '.note_id // ""' "$VB/manifest.json" 2>/dev/null)
+        if [ -n "$NID" ] && echo " $SEEN_VIDEO_IDS " | grep -q " $NID "; then
+          echo "video lane: $(basename "$VB") 跨 kw 撞车 (note_id=$NID), 去重移除"
+          rm -rf "$VB"
+        else
+          SEEN_VIDEO_IDS="$SEEN_VIDEO_IDS $NID"
+          echo "video lane: ✓ $(basename "$VB")"
+        fi
+      else
+        echo "video lane: ✗ $vurl 下载/转录失败 (细节 _video_lane.log)"
+      fi
+    done < "$VTSV"
+  done
+fi
 
 # Cleanup runs via trap
 exit $MOB_EXIT

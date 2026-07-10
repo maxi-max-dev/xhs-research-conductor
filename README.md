@@ -216,12 +216,22 @@ End cleanup — xhs-cleanup.sh (force-stop XHS + Chrome, prevent stale state)
 
 ---
 
-## Known limitations (v0.16.2)
+## What's new in v0.17 — video lane 🎬
+
+Video notes are no longer a blind spot. After the image-note capture finishes, the dispatcher runs a **deterministic video lane** (no LLM involved): per keyword it re-fires the search deep link, switches the filter to Video, harvests the top-N share links from the immersive feed, then downloads the audio track with `yt-dlp` (works without cookies) and transcribes it (Whisper). Reports gain a "🎬 视频笔记" section with title + link + spoken-word excerpt.
+
+- Defaults: fast = 1 video/kw, deep = 2/kw. Tune with `--videos N` (0 disables) or `XHS_VIDEOS`.
+- Music-only / subtitle-only videos are flagged (`voice_info: low`) instead of pretending the transcript is content.
+- Single video link? `mobile-dependencies/scripts/xhs-video-note.sh '<url or share text>'` gives you a transcript bundle directly.
+- Transcription backend: set `XHS_TRANSCRIBE_CMD` to any CLI accepting `-l zh -f txt -o <dir> <audio>` (defaults to a local `transcribe-file.sh` if present). Without one, the lane degrades to audio + metadata.
+- Why videos were impossible before: uiautomator never idles while a video plays (dump always fails) — but the share sheet pauses playback, which is exactly the window the harvester uses.
+
+## Known limitations (v0.17)
 
 - **Default backend is the OpenClaw mobile agent** (battle-tested). `XHS_AGENT_CMD` plugs in any other CLI agent, but that hook is new and lightly tested. Playwright (no-emulator) backend is v1.x.
 - **LLM ~10 min single-request wall is a hard constraint**: a multi-kw fast run WILL get killed mid-final-kw on slower models. v0.16.1 recovers automatically (resume agent + blacklist discipline + OCR salvage + incremental retro; T32-verified end-to-end), but total time stretches to 15-30 min. Use `xhs-research-serial.sh` for clean per-kw runs.
 - **Emulator flakiness is real**: BlueStacks adbd can die mid-run (self-heal restarts it, costs ~5-10 min). Not fixable at this layer.
-- **Only 图文 notes** (vlog skipped via filter, 铁律 16). Video link → use separate `xhs-open-link` skill.
+- **In-app video capture stays impossible by design** (图文 filter 铁律 16 unchanged); videos flow through the v0.17 lane instead. Hard-burned subtitles/stickers are NOT extracted — such videos get flagged `voice_info: low` (frame-OCR is a future item).
 - **English kw better for 海外 brand** (T12 finding, 海外券商类实证). 国产 brand 用中文.
 - **source URL偶发 fail**: BlueStacks 剪贴板 sync 偶发慢, v0.13 加了 3-retry 但还有 ~10% miss rate. T26 1/3 bundle 无 URL.
 - **Signal-to-noise variable by domain**:
@@ -249,11 +259,12 @@ End cleanup — xhs-cleanup.sh (force-stop XHS + Chrome, prevent stale state)
 - [x] v0.16.1: OCR salvage on truncated bundles + incremental retro + count consistency (survives the ~10 min LLM wall, T30-T32)
 - [x] v0.16.2: **agent-agnostic runner hook** `XHS_AGENT_CMD` — bring your own agent (Claude Code / Codex / custom)
 - [x] v0.16.3: **portable everywhere** — clone-anywhere paths, resolution-proportional coordinates (any emulator size), user-selectable output (`VAULT_ROOT`/`VAULT_FOLDER`/`XHS_FOLDER_STYLE`/`XHS_CAPTURE_ROOT`)
-- [ ] v0.17: freshness auto-prompt ("report is X days old, rerun?") instead of silent skip
+- [x] v0.17: **video lane 🎬** — deterministic share-link harvest from the immersive feed + yt-dlp audio + Whisper transcript into the report (`--videos N`, music-only detection, video-only reports)
+- [ ] v0.18: freshness auto-prompt ("report is X days old, rerun?") instead of silent skip
 - [ ] **v1.0: Cross-source** (XHS + 牛客 + 知乎 + B 站) — major architecture epic, separate worker per source + conductor merge layer. Estimated 4-8 hr build + 2-3 weeks dogfood.
 - [ ] v1.1+: Playwright backend (no emulator), Cursor / Cline / Codex adapters
 
-**Test history**: 32 dogfood tests over two months (2026-05 → 2026-07) drove every version above — every rule in `XHS_RUNBOOK.md` and every fallback in dispatch exists because a real run broke without it. Per-version retros land in `$XHS_RESEARCH_LOG`.
+**Test history**: 33 dogfood tests over two months (2026-05 → 2026-07) drove every version above — every rule in `XHS_RUNBOOK.md` and every fallback in dispatch exists because a real run broke without it. Per-version retros land in `$XHS_RESEARCH_LOG`.
 
 ---
 
